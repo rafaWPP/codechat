@@ -84,12 +84,12 @@ Using the database is optional.
 
 Cloning the Repository
 ```
-git clone https://github.com/code-chat-br/whatsapp-api.git
+git clone https://github.com/rafaWPP/codechat.git
 ```
 
 Go to the project directory and install all dependencies.</br>
 ```sh
-cd whatsapp-api
+cd codechat
 
 yarn i
 ```
