@@ -449,9 +449,24 @@ export class WAStartupService {
 
       this.instance.authState = await this.defineAuthState();
 
-      const { version } = await fetchLatestBaileysVersion();
       const session = this.configService.get<ConfigSessionPhone>('CONFIG_SESSION_PHONE');
       const browser: WABrowserDescription = [session.CLIENT, session.NAME, release()];
+
+      let version
+      let versionLog
+    
+      // 3) Preencha manual ou automático
+      if (session.VERSION) {
+        version = session.VERSION.toString().split(',');
+        versionLog = `Baileys version env: ${version}`;
+      } else {
+        const baileysVersion = await fetchLatestBaileysVersion();
+        version = baileysVersion.version;
+        versionLog = `Baileys version: ${version}`;
+      }
+    
+      // 4) Logue se quiser
+      this.logger.info("Version Baileys: " + versionLog)
 
       const socketConfig: UserFacingSocketConfig = {
         auth: {

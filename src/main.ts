@@ -34,7 +34,7 @@
  */
 
 import compression from 'compression';
-import { configService, Cors, HttpServer } from './config/env.config';
+import { configService, ConfigSessionPhone, Cors, HttpServer } from './config/env.config';
 import cors from 'cors';
 import express, { json, NextFunction, Request, Response, urlencoded } from 'express';
 import { join } from 'path';
@@ -120,6 +120,19 @@ function bootstrap() {
 
   server.listen(httpServer.PORT, () => {
     logger.log(httpServer.TYPE.toUpperCase() + ' - ON: ' + httpServer.PORT + '\n\n');
+
+    const session = configService.get<ConfigSessionPhone>('CONFIG_SESSION_PHONE');
+    
+    let version
+    let versionLog
+        
+    if (session.VERSION) {
+      version = session.VERSION.toString().split(',');
+      versionLog = `Baileys version env: [ ${version} ]`;
+
+      logger.info(versionLog)
+    }
+
     new Logger('Swagger Docs').warn(
       `
       ┌──────────────────────────────┐

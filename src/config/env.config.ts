@@ -121,7 +121,7 @@ export type DelInstance = number | boolean;
 export type GlobalWebhook = { URL: string; ENABLED: boolean };
 export type SslConf = { PRIVKEY: string; FULLCHAIN: string };
 export type Webhook = { GLOBAL?: GlobalWebhook; EVENTS: EventsWebhook };
-export type ConfigSessionPhone = { CLIENT: string; NAME: string };
+export type ConfigSessionPhone = { CLIENT: string; NAME: string; VERSION?: string | number };
 export type QrCode = { LIMIT: number };
 
 export interface Env {
