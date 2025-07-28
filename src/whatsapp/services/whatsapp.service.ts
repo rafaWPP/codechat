@@ -609,12 +609,21 @@ export class WAStartupService {
       {
         messages,
         chats,
-        isLatest,
+        isLatest = false,
+        contacts = [],
+        progress,
+        syncType,
+        peerDataRequestSessionId,
+        ...rest
       }: {
         chats: Chat[];
-        contacts: Contact[];
+        contacts?: Contact[];
         messages: proto.IWebMessageInfo[];
-        isLatest: boolean;
+        isLatest?: boolean;
+        progress?: number;
+        syncType?: any;
+        peerDataRequestSessionId?: string;
+        [key: string]: any;
       },
       database: Database,
     ) => {
@@ -1161,7 +1170,8 @@ export class WAStartupService {
       } else {
         try {
           const result = (await this.client.onWhatsApp(jid))[0];
-          onWhatsapp.push(new OnWhatsAppDto(result.jid, result.exists));
+          const exists = typeof result.exists === 'boolean' ? result.exists : false;
+          onWhatsapp.push(new OnWhatsAppDto(result.jid, exists));
         } catch (error) {
           onWhatsapp.push(new OnWhatsAppDto(number, false));
         }

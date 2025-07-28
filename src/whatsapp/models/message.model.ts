@@ -44,6 +44,7 @@
 import { Schema } from 'mongoose';
 import { dbserver } from '../../db/db.connect';
 import { wa } from '../types/wa.types';
+import Long from 'long';
 
 class Key {
   id?: string;
@@ -58,9 +59,9 @@ export class MessageRaw {
   pushName?: string;
   participant?: string;
   message?: object;
-  messageTimestamp?: number | Long.Long;
+  messageTimestamp?: number | Long;
   owner: string;
-  source?: 'android' | 'web' | 'ios';
+  source?: 'android' | 'web' | 'ios' | 'unknown' | 'desktop';
 }
 
 const messageSchema = new Schema<MessageRaw>({
@@ -74,7 +75,7 @@ const messageSchema = new Schema<MessageRaw>({
   pushName: { type: String },
   participant: { type: String },
   message: { type: Object },
-  source: { type: String, minlength: 3, enum: ['android', 'web', 'ios'] },
+  source: { type: String, minlength: 3, enum: ['android', 'web', 'ios', 'unknown', 'desktop'] },
   messageTimestamp: { type: Number, required: true },
   owner: { type: String, required: true, minlength: 1 },
 });
