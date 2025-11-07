@@ -362,9 +362,39 @@ export class WAStartupService {
     }
 
     if (connection === 'close') {
-      const shouldReconnect =
-        (lastDisconnect.error as Boom)?.output?.statusCode !== DisconnectReason.loggedOut;
+      const statusCode = (lastDisconnect.error as Boom)?.output?.statusCode;
+      const errorData = lastDisconnect.error as any;
+      
+      // Verifica múltiplas formas de detectar device_removed
+      const isDeviceRemoved = 
+        statusCode === 401 ||
+        statusCode === DisconnectReason.loggedOut ||
+        errorData?.data?.tag === 'conflict' ||
+        errorData?.data?.attrs?.type === 'device_removed' ||
+        (errorData?.data?.content && 
+         Array.isArray(errorData.data.content) && 
+         errorData.data.content.some((item: any) => 
+           item?.tag === 'conflict' && item?.attrs?.type === 'device_removed'
+         )) ||
+        JSON.stringify(errorData || {}).includes('device_removed');
+      
+      // Se o dispositivo foi removido, não reconectar automaticamente
+      if (isDeviceRemoved) {
+        // Não loga aqui - o monitor service fará o log quando receber o evento
+        this.sendDataWebhook(Events.STATUS_INSTANCE, {
+          instance: this.instance.name,
+          status: 'removed',
+          reason: 'device_removed',
+        });
+        this.eventEmitter.emit('remove.instance', this.instance.name, 'inner', 'device_removed');
+        this.client?.ws?.close();
+        this.client.end(new Error('Device removed'));
+        return;
+      }
+
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
       if (shouldReconnect) {
+        this.logger.info('Reconnecting to WhatsApp...');
         await this.connectToWhatsapp();
       } else {
         this.sendDataWebhook(Events.STATUS_INSTANCE, {
@@ -382,8 +412,10 @@ export class WAStartupService {
       this.instance.profilePictureUrl = (
         await this.profilePicture(this.instance.wuid)
       ).profilePictureUrl;
+      const instanceName = this.instance.name || 'Unknown';
       this.logger.info(
         `
+        |_Instance: ${instanceName}
         ┌──────────────────────────────┐
         │    CONNECTED TO WHATSAPP     │
         └──────────────────────────────┘`.replace(/^ +/gm, '  '),
@@ -468,15 +500,76 @@ export class WAStartupService {
       // 4) Logue se quiser
       this.logger.info("Version Baileys: " + versionLog)
 
+      // Logger customizado que filtra erros tratados
+      // Cria um logger base e intercepta métodos de log para filtrar antes de escrever
+      const baseLogger = P({ level: 'error' });
+      
+      // Função auxiliar para verificar se deve filtrar o log
+      // Filtra erros tratados: stream errors (401, 515), device_removed e mensagens criptografadas
+      const shouldFilterLog = (obj: any, msg?: string): boolean => {
+        const logStr = JSON.stringify(obj || {}) + (msg || '');
+        
+        return (
+          // Stream errors tratados (401 - device_removed, 515 - erros temporários)
+          (logStr.includes('stream errored out') && 
+           (logStr.includes('"code":"401"') ||
+            logStr.includes('"code":401') ||
+            logStr.includes('"code":"515"') ||
+            logStr.includes('"code":515') ||
+            (obj?.node?.attrs?.code === '401' || obj?.node?.attrs?.code === 401) ||
+            (obj?.node?.attrs?.code === '515' || obj?.node?.attrs?.code === 515))) ||
+          // Device removed (filtrado do Baileys, mas monitor service mostrará)
+          logStr.includes('device_removed') ||
+          (obj?.node?.content && Array.isArray(obj.node.content) && 
+           obj.node.content.some((c: any) => 
+             c?.tag === 'conflict' && c?.attrs?.type === 'device_removed'
+           )) ||
+          // Mensagens criptografadas (erros ao processar mensagens ainda criptografadas)
+          (logStr.includes('error in handling message') && 
+           (logStr.includes('"tag":"enc"') || 
+            logStr.includes('"tag":"encryptedMessage"') || 
+            logStr.includes('Internal Server Error') ||
+            (obj?.node?.content && Array.isArray(obj.node.content) &&
+             obj.node.content.some((c: any) => c?.tag === 'enc'))))
+        );
+      };
+      
+      const customLogger = {
+        ...baseLogger,
+        error: (obj: any, msg?: string) => {
+          if (!shouldFilterLog(obj, msg)) {
+            return baseLogger.error(obj, msg);
+          }
+          return;
+        },
+        warn: (obj: any, msg?: string) => {
+          if (!shouldFilterLog(obj, msg)) {
+            return baseLogger.warn?.(obj, msg);
+          }
+          return;
+        },
+        fatal: (obj: any, msg?: string) => {
+          if (!shouldFilterLog(obj, msg)) {
+            return baseLogger.fatal?.(obj, msg);
+          }
+          return;
+        },
+        info: baseLogger.info?.bind(baseLogger),
+        debug: baseLogger.debug?.bind(baseLogger),
+        trace: baseLogger.trace?.bind(baseLogger),
+        child: baseLogger.child.bind(baseLogger),
+        level: baseLogger.level,
+      };
+
       const socketConfig: UserFacingSocketConfig = {
         auth: {
           creds: this.instance.authState.state.creds,
           keys: makeCacheableSignalKeyStore(
             this.instance.authState.state.keys,
-            P({ level: 'error' }),
+            customLogger,
           ),
         },
-        logger: P({ level: 'error' }),
+        logger: customLogger,
         printQRInTerminal: false,
         browser,
         version,
@@ -690,58 +783,131 @@ export class WAStartupService {
       },
       database: Database,
     ) => {
-      const received = messages[0];
-      if (
-        type !== 'notify' ||
-        !received?.message ||
-        received.message?.protocolMessage ||
-        received.message.senderKeyDistributionMessage
-      ) {
-        return;
+      try {
+        const received = messages[0];
+        if (
+          type !== 'notify' ||
+          !received?.message ||
+          received.message?.protocolMessage ||
+          received.message.senderKeyDistributionMessage
+        ) {
+          return;
+        }
+
+        // Valida se a mensagem tem conteúdo processável
+        if (!received.key || !received.messageTimestamp) {
+          return;
+        }
+
+        // Verifica se a mensagem está em formato XML/criptografado (não descriptografada)
+        // Mensagens criptografadas chegam como objetos com propriedades 'tag', 'attrs', 'content'
+        const messageStr = JSON.stringify(received.message || {});
+        if (
+          messageStr.includes('"tag":"enc"') ||
+          messageStr.includes('"tag":"encryptedMessage"') ||
+          (received.message as any)?.enc ||
+          (received.message as any)?.encryptedMessage
+        ) {
+          // Mensagem ainda não descriptografada, aguardar processamento pelo Baileys
+          return;
+        }
+
+        // Verifica se a mensagem tem conteúdo válido (não apenas estrutura vazia)
+        const hasValidContent = Object.keys(received.message || {}).some(
+          (key) =>
+            key !== 'messageContextInfo' &&
+            key !== 'senderKeyDistributionMessage' &&
+            received.message[key] !== undefined &&
+            received.message[key] !== null,
+        );
+
+        if (!hasValidContent) {
+          return;
+        }
+
+        if (Long.isLong(received.messageTimestamp)) {
+          received.messageTimestamp = received.messageTimestamp?.toNumber();
+        }
+
+        const messageRaw: MessageRaw = {
+          key: received.key,
+          pushName: received.pushName,
+          message: { ...received.message },
+          messageTimestamp: received.messageTimestamp as number,
+          owner: this.instance.wuid,
+          source: getDevice(received.key.id),
+        };
+
+        this.logger.log(received);
+
+        await this.repository.message.insert([messageRaw], database.SAVE_DATA.NEW_MESSAGE);
+        await this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
+      } catch (error) {
+        // Silencia erros de mensagens criptografadas que não podem ser processadas
+        const errorMsg = error?.message || error?.toString() || '';
+        const errorStr = JSON.stringify(error || {});
+        
+        // Erros tratados - não logar
+        if (
+          errorMsg.includes('encrypted') ||
+          errorMsg.includes('decrypt') ||
+          errorMsg.includes('Internal Server Error') ||
+          errorStr.includes('"tag":"enc"') ||
+          errorStr.includes('device_removed') ||
+          errorStr.includes('stream errored out')
+        ) {
+          // Erro esperado e tratado, não logar
+          return;
+        }
+        // Apenas loga erros não tratados
+        this.logger.error({
+          error: error?.message || error,
+          stack: error?.stack,
+          msg: 'error in handling message',
+        });
       }
-
-      if (Long.isLong(received.messageTimestamp)) {
-        received.messageTimestamp = received.messageTimestamp?.toNumber();
-      }
-
-      const messageRaw: MessageRaw = {
-        key: received.key,
-        pushName: received.pushName,
-        message: { ...received.message },
-        messageTimestamp: received.messageTimestamp as number,
-        owner: this.instance.wuid,
-        source: getDevice(received.key.id),
-      };
-
-      this.logger.log(received);
-
-      await this.repository.message.insert([messageRaw], database.SAVE_DATA.NEW_MESSAGE);
-      await this.sendDataWebhook(Events.MESSAGES_UPSERT, messageRaw);
     },
 
     'messages.update': async (args: WAMessageUpdate[], database: Database) => {
-      const status: Record<number, wa.StatusMessage> = {
-        0: 'ERROR',
-        1: 'PENDING',
-        2: 'SERVER_ACK',
-        3: 'DELIVERY_ACK',
-        4: 'READ',
-        5: 'PLAYED',
-      };
-      for await (const { key, update } of args) {
-        if (key.remoteJid !== 'status@broadcast' && !key?.remoteJid?.match(/(:\d+)/)) {
-          const message: MessageUpdateRaw = {
-            ...key,
-            status: status[update.status],
-            datetime: Date.now(),
-            owner: this.instance.wuid,
-          };
-          await this.sendDataWebhook(Events.MESSAGES_UPDATE, message);
-          await this.repository.messageUpdate.insert(
-            [message],
-            database.SAVE_DATA.MESSAGE_UPDATE,
-          );
+      try {
+        const status: Record<number, wa.StatusMessage> = {
+          0: 'ERROR',
+          1: 'PENDING',
+          2: 'SERVER_ACK',
+          3: 'DELIVERY_ACK',
+          4: 'READ',
+          5: 'PLAYED',
+        };
+        for await (const { key, update } of args) {
+          try {
+            if (key.remoteJid !== 'status@broadcast' && !key?.remoteJid?.match(/(:\d+)/)) {
+              const message: MessageUpdateRaw = {
+                ...key,
+                status: status[update.status],
+                datetime: Date.now(),
+                owner: this.instance.wuid,
+              };
+              await this.sendDataWebhook(Events.MESSAGES_UPDATE, message);
+              await this.repository.messageUpdate.insert(
+                [message],
+                database.SAVE_DATA.MESSAGE_UPDATE,
+              );
+            }
+          } catch (error) {
+            this.logger.error({
+              error: error?.message || error,
+              stack: error?.stack,
+              msg: 'error processing message update',
+              key,
+            });
+          }
         }
+      } catch (error) {
+        this.logger.error({
+          error: error?.message || error,
+          stack: error?.stack,
+          msg: 'error in messages.update handler',
+        });
       }
     },
   };
@@ -767,74 +933,92 @@ export class WAStartupService {
   private eventHandler() {
     this.client.ev.process((events) => {
       if (!this.endSession) {
-        const database = this.configService.get<Database>('DATABASE');
+        try {
+          const database = this.configService.get<Database>('DATABASE');
 
-        if (events['connection.update']) {
-          this.connectionUpdate(events['connection.update']);
-        }
+          if (events['connection.update']) {
+            this.connectionUpdate(events['connection.update']);
+          }
 
-        if (events['creds.update']) {
-          this.instance.authState.saveCreds();
-        }
+          if (events['creds.update']) {
+            this.instance.authState.saveCreds();
+          }
 
-        if (events['messaging-history.set']) {
-          const payload = events['messaging-history.set'];
-          this.messageHandle['messaging-history.set'](payload, database);
-        }
+          if (events['messaging-history.set']) {
+            const payload = events['messaging-history.set'];
+            this.messageHandle['messaging-history.set'](payload, database).catch((error) => {
+              this.logger.error({ error: error?.message || error, msg: 'error in messaging-history.set' });
+            });
+          }
 
-        if (events['messages.upsert']) {
-          const payload = events['messages.upsert'];
-          this.messageHandle['messages.upsert'](payload, database);
-        }
+          if (events['messages.upsert']) {
+            const payload = events['messages.upsert'];
+            this.messageHandle['messages.upsert'](payload, database).catch((error) => {
+              this.logger.error({ error: error?.message || error, msg: 'error in messages.upsert' });
+            });
+          }
 
-        if (events['messages.update']) {
-          const payload = events['messages.update'];
-          this.messageHandle['messages.update'](payload, database);
-        }
+          if (events['messages.update']) {
+            const payload = events['messages.update'];
+            this.messageHandle['messages.update'](payload, database).catch((error) => {
+              this.logger.error({ error: error?.message || error, msg: 'error in messages.update' });
+            });
+          }
 
-        if (events['presence.update']) {
-          const payload = events['presence.update'];
-          this.sendDataWebhook(Events.PRESENCE_UPDATE, payload);
-        }
+          if (events['presence.update']) {
+            const payload = events['presence.update'];
+            this.sendDataWebhook(Events.PRESENCE_UPDATE, payload);
+          }
 
-        if (events['groups.upsert']) {
-          const payload = events['groups.upsert'];
-          this.groupHandler['groups.upsert'](payload);
-        }
+          if (events['groups.upsert']) {
+            const payload = events['groups.upsert'];
+            this.groupHandler['groups.upsert'](payload);
+          }
 
-        if (events['groups.update']) {
-          const payload = events['groups.update'];
-          this.groupHandler['groups.update'](payload);
-        }
+          if (events['groups.update']) {
+            const payload = events['groups.update'];
+            this.groupHandler['groups.update'](payload);
+          }
 
-        if (events['group-participants.update']) {
-          const payload = events['group-participants.update'];
-          this.groupHandler['group-participants.update'](payload);
-        }
+          if (events['group-participants.update']) {
+            const payload = events['group-participants.update'];
+            this.groupHandler['group-participants.update'](payload);
+          }
 
-        if (events['chats.upsert']) {
-          const payload = events['chats.upsert'];
-          this.chatHandle['chats.upsert'](payload, database);
-        }
+          if (events['chats.upsert']) {
+            const payload = events['chats.upsert'];
+            this.chatHandle['chats.upsert'](payload, database).catch((error) => {
+              this.logger.error({ error: error?.message || error, msg: 'error in chats.upsert' });
+            });
+          }
 
-        if (events['chats.update']) {
-          const payload = events['chats.update'];
-          this.chatHandle['chats.update'](payload);
-        }
+          if (events['chats.update']) {
+            const payload = events['chats.update'];
+            this.chatHandle['chats.update'](payload);
+          }
 
-        if (events['chats.delete']) {
-          const payload = events['chats.delete'];
-          this.chatHandle['chats.delete'](payload);
-        }
+          if (events['chats.delete']) {
+            const payload = events['chats.delete'];
+            this.chatHandle['chats.delete'](payload);
+          }
 
-        if (events['contacts.upsert']) {
-          const payload = events['contacts.upsert'];
-          this.contactHandle['contacts.upsert'](payload, database);
-        }
+          if (events['contacts.upsert']) {
+            const payload = events['contacts.upsert'];
+            this.contactHandle['contacts.upsert'](payload, database).catch((error) => {
+              this.logger.error({ error: error?.message || error, msg: 'error in contacts.upsert' });
+            });
+          }
 
-        if (events['contacts.update']) {
-          const payload = events['contacts.update'];
-          this.contactHandle['contacts.update'](payload);
+          if (events['contacts.update']) {
+            const payload = events['contacts.update'];
+            this.contactHandle['contacts.update'](payload);
+          }
+        } catch (error) {
+          this.logger.error({
+            error: error?.message || error,
+            stack: error?.stack,
+            msg: 'error in eventHandler',
+          });
         }
       }
     });

@@ -219,7 +219,7 @@ export class WAMonitoringService {
   }
 
   private removeInstance() {
-    this.eventEmitter.on('remove.instance', async (instanceName: string) => {
+    this.eventEmitter.on('remove.instance', async (instanceName: string, source?: string, reason?: string) => {
       try {
         this.waInstances[instanceName] = undefined;
       } catch {}
@@ -227,7 +227,12 @@ export class WAMonitoringService {
       try {
         this.cleaningUp(instanceName);
       } finally {
-        this.logger.warn(`Instance "${instanceName}" - REMOVED`);
+        // Sempre loga remoções, incluindo device_removed (usuário quer ver logs de remoção)
+        if (reason === 'device_removed') {
+          this.logger.warn(`Instance "${instanceName}" - REMOVED (device removed/logged out)`);
+        } else {
+          this.logger.warn(`Instance "${instanceName}" - REMOVED`);
+        }
       }
     });
   }
