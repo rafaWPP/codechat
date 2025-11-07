@@ -405,7 +405,8 @@ export class WAStartupService {
 
       const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
       if (shouldReconnect) {
-        this.logger.info('Reconnecting to WhatsApp...');
+        // Reduzido log de reconexão para diminuir sobrecarga
+        // this.logger.info('Reconnecting to WhatsApp...');
         await this.connectToWhatsapp();
       } else {
         this.sendDataWebhook(Events.STATUS_INSTANCE, {
@@ -516,19 +517,14 @@ export class WAStartupService {
       const baseLogger = P({ level: 'error' });
       
       // Função auxiliar para verificar se deve filtrar o log
-      // Filtra erros tratados: stream errors (401, 515), device_removed e mensagens criptografadas
+      // Filtra erros tratados: stream errors (401, 515), device_removed, mensagens criptografadas e erros de conexão
       const shouldFilterLog = (obj: any, msg?: string): boolean => {
         const logStr = JSON.stringify(obj || {}) + (msg || '');
         
         return (
-          // Stream errors tratados (401 - device_removed, 515 - erros temporários)
-          (logStr.includes('stream errored out') && 
-           (logStr.includes('"code":"401"') ||
-            logStr.includes('"code":401') ||
-            logStr.includes('"code":"515"') ||
-            logStr.includes('"code":515') ||
-            (obj?.node?.attrs?.code === '401' || obj?.node?.attrs?.code === 401) ||
-            (obj?.node?.attrs?.code === '515' || obj?.node?.attrs?.code === 515))) ||
+          // Stream errors tratados (401 - device_removed, 515 - erros temporários, xml-not-well-formed)
+          logStr.includes('stream errored out') ||
+          logStr.includes('xml-not-well-formed') ||
           // Device removed (filtrado do Baileys, mas monitor service mostrará)
           logStr.includes('device_removed') ||
           (obj?.node?.content && Array.isArray(obj.node.content) && 
@@ -541,7 +537,11 @@ export class WAStartupService {
             logStr.includes('"tag":"encryptedMessage"') || 
             logStr.includes('Internal Server Error') ||
             (obj?.node?.content && Array.isArray(obj.node.content) &&
-             obj.node.content.some((c: any) => c?.tag === 'enc'))))
+             obj.node.content.some((c: any) => c?.tag === 'enc')))) ||
+          // Connection Closed e retry errors
+          logStr.includes('Connection Closed') ||
+          logStr.includes('Failed to handle retry') ||
+          logStr.includes('transaction failed, rolling back')
         );
       };
       
@@ -590,7 +590,7 @@ export class WAStartupService {
         msgRetryCounterCache: this.msgRetryCounterCache,
         getMessage: this.getMessage as any,
         generateHighQualityLinkPreview: true,
-        syncFullHistory: true,
+        syncFullHistory: false,
         userDevicesCache: this.userDevicesCache,
         transactionOpts: { maxCommitRetries: 1, delayBetweenTriesMs: 10 },
         patchMessageBeforeSending: (message) => {
