@@ -53,6 +53,7 @@ import makeWASocket, {
   getDevice,
   GroupMetadata,
   isJidGroup,
+  isJidUser,
   makeCacheableSignalKeyStore,
   MessageUpsertType,
   ParticipantAction,
@@ -136,10 +137,6 @@ import { dbserver } from '../../db/db.connect';
 import NodeCache from 'node-cache';
 import { useMultiFileAuthStateRedisDb } from '../../utils/use-multi-file-auth-state-redis-db';
 import { RedisCache } from '../../db/redis.client';
-
-const isUserJid = (jid?: string) =>
-  typeof jid === 'string' &&
-  (jid.endsWith('@s.whatsapp.net') || jid.endsWith('@whatsapp.net') || jid.endsWith('@lid'));
 
 export class WAStartupService {
   constructor(
@@ -1389,7 +1386,7 @@ export class WAStartupService {
     try {
       const keys: proto.IMessageKey[] = [];
       data.readMessages.forEach((read) => {
-        if (isJidGroup(read.remoteJid) || isUserJid(read.remoteJid)) {
+        if (isJidGroup(read.remoteJid) || isJidUser(read.remoteJid)) {
           keys.push({
             remoteJid: read.remoteJid,
             fromMe: read.fromMe,
