@@ -242,7 +242,8 @@ export class WAStartupService {
     if (webhook.EVENTS[we]) {
       try {
         if (this.localWebhook.enabled && isURL(this.localWebhook.url)) {
-          const httpService = axios.create({ baseURL: this.localWebhook.url });
+          const targetUrl = this.localWebhook.url;
+          const httpService = axios.create({ baseURL: targetUrl });
           await httpService.post(
             '',
             {
@@ -257,6 +258,10 @@ export class WAStartupService {
         this.logger.error({
           local: WAStartupService.name + '.sendDataWebhook-local',
           message: error?.message,
+          status: error?.response?.status,
+          webhookUrl: this.localWebhook.url,
+          event,
+          instance: this.instance.name,
           hostName: error?.hostname,
           syscall: error?.syscall,
           code: error?.code,
@@ -269,7 +274,8 @@ export class WAStartupService {
       try {
         const globalWebhook = this.configService.get<Webhook>('WEBHOOK').GLOBAL;
         if (globalWebhook && globalWebhook?.ENABLED && isURL(globalWebhook.URL)) {
-          const httpService = axios.create({ baseURL: globalWebhook.URL });
+          const targetUrl = globalWebhook.URL;
+          const httpService = axios.create({ baseURL: targetUrl });
           await httpService.post(
             '',
             {
@@ -284,6 +290,10 @@ export class WAStartupService {
         this.logger.error({
           local: WAStartupService.name + '.sendDataWebhook-global',
           message: error?.message,
+          status: error?.response?.status,
+          webhookUrl: this.configService.get<Webhook>('WEBHOOK').GLOBAL?.URL,
+          event,
+          instance: this.instance.name,
           hostName: error?.hostname,
           syscall: error?.syscall,
           code: error?.code,
