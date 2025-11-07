@@ -53,7 +53,6 @@ import makeWASocket, {
   getDevice,
   GroupMetadata,
   isJidGroup,
-  isJidUser,
   makeCacheableSignalKeyStore,
   MessageUpsertType,
   ParticipantAction,
@@ -78,6 +77,7 @@ import {
 import { Logger } from '../../config/logger.config';
 import { INSTANCE_DIR, ROOT_DIR } from '../../config/path.config';
 import { existsSync, readFileSync } from 'fs';
+
 import { join } from 'path';
 import axios from 'axios';
 import { v4 } from 'uuid';
@@ -136,6 +136,10 @@ import { dbserver } from '../../db/db.connect';
 import NodeCache from 'node-cache';
 import { useMultiFileAuthStateRedisDb } from '../../utils/use-multi-file-auth-state-redis-db';
 import { RedisCache } from '../../db/redis.client';
+
+const isUserJid = (jid?: string) =>
+  typeof jid === 'string' &&
+  (jid.endsWith('@s.whatsapp.net') || jid.endsWith('@whatsapp.net') || jid.endsWith('@lid'));
 
 export class WAStartupService {
   constructor(
@@ -923,10 +927,16 @@ export class WAStartupService {
 
     'group-participants.update': (participantsUpdate: {
       id: string;
-      participants: string[];
+      participants: Array<string | { id: string }>;
       action: ParticipantAction;
     }) => {
-      this.sendDataWebhook(Events.GROUP_PARTICIPANTS_UPDATE, participantsUpdate);
+      const normalized = {
+        ...participantsUpdate,
+        participants: participantsUpdate.participants.map((participant) =>
+          typeof participant === 'string' ? participant : participant.id,
+        ),
+      };
+      this.sendDataWebhook(Events.GROUP_PARTICIPANTS_UPDATE, normalized);
     },
   };
 
@@ -1369,7 +1379,7 @@ export class WAStartupService {
     try {
       const keys: proto.IMessageKey[] = [];
       data.readMessages.forEach((read) => {
-        if (isJidGroup(read.remoteJid) || isJidUser(read.remoteJid)) {
+        if (isJidGroup(read.remoteJid) || isUserJid(read.remoteJid)) {
           keys.push({
             remoteJid: read.remoteJid,
             fromMe: read.fromMe,
